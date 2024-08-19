@@ -2,10 +2,10 @@ import numpy as np
 from gym.spaces import Box
 
 import pyflex
-from softgym.envs.fluid_env import FluidEnv
+from softgym.softgym.envs.fluid_env import FluidEnv
 import copy
-from softgym.utils.misc import quatFromAxisAngle
-from softgym.action_space.robot_env import RobotBase
+from softgym.softgym.utils.misc import quatFromAxisAngle
+from softgym.softgym.action_space.robot_env import RobotBase
 import random
 import cv2
 
@@ -624,7 +624,7 @@ if __name__ == '__main__':
         plt.savefig('/home/zhanyi/vlm-reward-private/temp_{}.png'.format(i), bbox_inches='tight', pad_inches=0)
         plt.close(fig)
 
-    # from softgym.utils.visualization import save_numpy_as_gif
+    # from softgym.softgym.utils.visualization import save_numpy_as_gif
     # SAVE_PATH = 'data/'
     # all_videos = []
     # # for i in range()

@@ -1,8 +1,8 @@
 import numpy as np
 import pyflex
 from copy import deepcopy
-from softgym.envs.cloth_env import ClothEnv
-from softgym.utils.pyflex_utils import center_object
+from softgym.softgym.envs.cloth_env import ClothEnv
+from softgym.softgym.utils.pyflex_utils import center_object
 import copy
 import os
 
@@ -314,5 +314,5 @@ if __name__ == '__main__':
 
 
     # all_positions = pyflex.get_positions().reshape(-1, 4)[:, :3]
-    # np.save("/home/yufei/vlm-reward-private/softgym/softgym/cached_initial_states/diagnal_fold_goal.pkl", all_positions)
+    # np.save("/home/yufei/vlm-reward-private/softgym.softgym/softgym.softgym/cached_initial_states/diagnal_fold_goal.pkl", all_positions)
 
