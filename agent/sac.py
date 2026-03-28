@@ -11,6 +11,13 @@ from agent import Agent
 from agent.critic import DoubleQCritic
 from agent.actor import DiagGaussianActor
 
+
+def optimizer_to(optimizer, device):
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
 def compute_state_entropy(obs, full_obs, k):
     batch_size = 500
     with torch.no_grad():
@@ -55,6 +62,7 @@ class SACAgent(Agent):
         self.alpha_lr = alpha_lr
         self.alpha_betas = alpha_betas
         self.actor_cfg = actor_cfg
+        self.actor_lr = actor_lr
         self.actor_betas = actor_betas
         self.alpha_lr = alpha_lr
 
@@ -203,7 +211,13 @@ class SACAgent(Agent):
 
         # self.critic.log(logger, step)
     
-    def save(self, model_dir, step):
+    def _resolve_model_dir(self, model_dir):
+        if os.path.isabs(model_dir):
+            return model_dir
+        file_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        return os.path.join(file_dir, model_dir)
+
+    def save(self, model_dir, step, include_optimizer_state=True):
         torch.save(
             self.actor.state_dict(), '%s/actor_%s.pt' % (model_dir, step)
         )
@@ -213,10 +227,22 @@ class SACAgent(Agent):
         torch.save(
             self.critic_target.state_dict(), '%s/critic_target_%s.pt' % (model_dir, step)
         )
+        if include_optimizer_state:
+            torch.save(
+                {
+                    "actor_optimizer": self.actor_optimizer.state_dict(),
+                    "critic_optimizer": self.critic_optimizer.state_dict(),
+                    "log_alpha_optimizer": self.log_alpha_optimizer.state_dict(),
+                    "log_alpha": self.log_alpha.detach().cpu(),
+                    "s_ent_stats_mean": self.s_ent_stats.mean.detach().cpu(),
+                    "s_ent_stats_var": self.s_ent_stats.var.detach().cpu(),
+                    "s_ent_stats_count": self.s_ent_stats.count,
+                },
+                "%s/agent_state_%s.pt" % (model_dir, step),
+            )
         
-    def load(self, model_dir, step):
-        file_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        model_dir = os.path.join(file_dir, model_dir)
+    def load(self, model_dir, step, load_optimizer_state=True):
+        model_dir = self._resolve_model_dir(model_dir)
         
         self.actor.load_state_dict(
             torch.load('%s/actor_%s.pt' % (model_dir, step))
@@ -227,6 +253,25 @@ class SACAgent(Agent):
         self.critic_target.load_state_dict(
             torch.load('%s/critic_target_%s.pt' % (model_dir, step))
         )
+        if load_optimizer_state:
+            state_path = "%s/agent_state_%s.pt" % (model_dir, step)
+            if os.path.exists(state_path):
+                state = torch.load(state_path, map_location=self.device)
+                self.actor_optimizer.load_state_dict(state["actor_optimizer"])
+                self.critic_optimizer.load_state_dict(state["critic_optimizer"])
+                optimizer_to(self.actor_optimizer, self.device)
+                optimizer_to(self.critic_optimizer, self.device)
+                self.log_alpha = state["log_alpha"].to(self.device)
+                self.log_alpha.requires_grad = True
+                self.log_alpha_optimizer = torch.optim.Adam(
+                    [self.log_alpha],
+                    lr=self.alpha_lr,
+                    betas=self.alpha_betas)
+                self.log_alpha_optimizer.load_state_dict(state["log_alpha_optimizer"])
+                optimizer_to(self.log_alpha_optimizer, self.device)
+                self.s_ent_stats.mean = state["s_ent_stats_mean"].to(self.device)
+                self.s_ent_stats.var = state["s_ent_stats_var"].to(self.device)
+                self.s_ent_stats.count = state["s_ent_stats_count"]
     
     def update_actor_and_alpha(self, obs, logger, step, print_flag=False):
         dist = self.actor(obs)

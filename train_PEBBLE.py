@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
+import json
 import numpy as np
 import torch
 import os
+import re
 import time
 import pickle as pkl
 
 from logger import Logger
 from replay_buffer import ReplayBuffer
 from reward_model import RewardModel
-from reward_model_score import RewardModelScore
 from collections import deque
 from prompt import clip_env_prompts
 
 import utils
 import hydra
 from PIL import Image
-
-from vlms.blip_infer_2 import blip2_image_text_matching
-from vlms.clip_infer import clip_infer_score as clip_image_text_matching
 import cv2
+from omegaconf import OmegaConf
+
+CHECKPOINT_PATTERN = re.compile(r"actor_(\d+)\.pt$")
+
 
 class Workspace(object):
     def __init__(self, cfg):
@@ -26,6 +28,20 @@ class Workspace(object):
         print(f'workspace: {self.work_dir}')
 
         self.cfg = cfg
+        self.model_save_dir = os.path.join(self.work_dir, "models")
+        self.resume_enabled = bool(getattr(cfg, "resume", False))
+        self.resume_step = int(getattr(cfg, "resume_step", -1))
+        self.resume_keep_latest_only = bool(getattr(cfg, "resume_keep_latest_only", True))
+        self.resume_checkpoint_state = None
+        self.resume_checkpoint_step = None
+        if self.resume_enabled:
+            self.resume_checkpoint_step = self._get_resume_checkpoint_step(self.model_save_dir, self.resume_step)
+            if self.resume_checkpoint_step is not None:
+                self.resume_checkpoint_state = self._load_workspace_state(self.model_save_dir, self.resume_checkpoint_step)
+                self.resume_checkpoint_state["checkpoint_step"] = self.resume_checkpoint_step
+                print("resuming run from checkpoint step {}".format(self.resume_checkpoint_step))
+            else:
+                print("resume requested but no checkpoint was found; starting fresh")
         self.cfg.prompt = clip_env_prompts[cfg.env]
         self.cfg.clip_prompt = clip_env_prompts[cfg.env]
         self.reward = self.cfg.reward # what types of reward to use
@@ -33,7 +49,17 @@ class Workspace(object):
             self.work_dir,
             save_tb=cfg.log_save_tb,
             log_frequency=cfg.log_frequency,
-            agent=cfg.agent.name)
+            agent=cfg.agent.name,
+            use_wandb=cfg.wandb,
+            wandb_project=cfg.wandb_project,
+            wandb_entity=cfg.wandb_entity,
+            wandb_group=cfg.wandb_group,
+            wandb_name=cfg.wandb_name,
+            wandb_job_type=cfg.wandb_job_type,
+            wandb_mode=cfg.wandb_mode,
+            wandb_config=OmegaConf.to_container(cfg, resolve=False),
+            resume=self.resume_checkpoint_state is not None,
+            wandb_run_id=self.resume_checkpoint_state.get("wandb_run_id", "") if self.resume_checkpoint_state else "")
         
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
@@ -97,6 +123,7 @@ class Workspace(object):
         if self.reward == 'learn_from_preference':
             reward_model_class = RewardModel
         elif self.reward == 'learn_from_score':
+            from reward_model_score import RewardModelScore
             reward_model_class = RewardModelScore
         
         self.reward_model = reward_model_class(
@@ -137,27 +164,119 @@ class Workspace(object):
             conv_n_channels=cfg.conv_n_channels,
         )
         
-        if self.cfg.reward_model_load_dir != "None":
+        if self.resume_checkpoint_state is not None:
+            self._load_checkpoint(self.model_save_dir, self.resume_checkpoint_step)
+        elif self.cfg.reward_model_load_dir != "None":
             print("loading reward model at {}".format(self.cfg.reward_model_load_dir))
             self.reward_model.load(self.cfg.reward_model_load_dir, 1000000) 
                 
-        if self.cfg.agent_model_load_dir != "None":
+        if self.resume_checkpoint_state is None and self.cfg.agent_model_load_dir != "None":
             print("loading agent model at {}".format(self.cfg.agent_model_load_dir))
             self.agent.load(self.cfg.agent_model_load_dir, 1000000) 
+
+    def _latest_checkpoint_marker_path(self, model_save_dir):
+        return os.path.join(model_save_dir, "latest_checkpoint.json")
+
+    def _workspace_state_path(self, model_save_dir, step):
+        return os.path.join(model_save_dir, "workspace_state_{}.pkl".format(step))
+
+    def _replay_buffer_state_path(self, model_save_dir, step):
+        return os.path.join(model_save_dir, "replay_buffer_state_{}.pkl".format(step))
+
+    def _get_resume_checkpoint_step(self, model_save_dir, requested_step):
+        if requested_step and requested_step > 0:
+            return requested_step
+        marker_path = self._latest_checkpoint_marker_path(model_save_dir)
+        if os.path.exists(marker_path):
+            with open(marker_path, "r", encoding="utf-8") as f:
+                marker = json.load(f)
+            latest_step = marker.get("latest_step")
+            if latest_step is not None:
+                return int(latest_step)
+        if not os.path.isdir(model_save_dir):
+            return None
+        checkpoint_steps = []
+        for name in os.listdir(model_save_dir):
+            match = CHECKPOINT_PATTERN.match(name)
+            if match is not None:
+                checkpoint_steps.append(int(match.group(1)))
+        if not checkpoint_steps:
+            return None
+        return max(checkpoint_steps)
+
+    def _load_workspace_state(self, model_save_dir, step):
+        state_path = self._workspace_state_path(model_save_dir, step)
+        if not os.path.exists(state_path):
+            return {"step": step}
+        with open(state_path, "rb") as f:
+            return pkl.load(f)
+
+    def _delete_old_runtime_state(self, model_save_dir, step):
+        old_paths = [
+            os.path.join(model_save_dir, "agent_state_{}.pt".format(step)),
+            os.path.join(model_save_dir, "reward_model_state_{}.pkl".format(step)),
+            self._replay_buffer_state_path(model_save_dir, step),
+            self._workspace_state_path(model_save_dir, step),
+        ]
+        for old_path in old_paths:
+            if os.path.exists(old_path):
+                os.remove(old_path)
+
+    def _save_checkpoint(self, model_save_dir, checkpoint_step, episode, interact_count,
+                         reward_learning_acc, vlm_acc, eval_cnt, avg_train_true_return):
+        os.makedirs(model_save_dir, exist_ok=True)
+        previous_step = self._get_resume_checkpoint_step(model_save_dir, -1)
+        print("saving resumable checkpoint at step {}".format(checkpoint_step))
+        self.agent.save(model_save_dir, checkpoint_step)
+        self.reward_model.save(model_save_dir, checkpoint_step)
+        self.replay_buffer.save(self._replay_buffer_state_path(model_save_dir, checkpoint_step))
+        workspace_state = {
+            "checkpoint_step": checkpoint_step,
+            "step": self.step,
+            "episode": episode,
+            "total_feedback": self.total_feedback,
+            "labeled_feedback": self.labeled_feedback,
+            "interact_count": interact_count,
+            "reward_learning_acc": reward_learning_acc,
+            "vlm_acc": vlm_acc,
+            "eval_cnt": eval_cnt,
+            "avg_train_true_return": list(avg_train_true_return),
+            "wandb_run_id": getattr(self.logger._wandb_run, "id", "") if self.logger._wandb_run is not None else "",
+        }
+        with open(self._workspace_state_path(model_save_dir, checkpoint_step), "wb") as f:
+            pkl.dump(workspace_state, f, protocol=pkl.HIGHEST_PROTOCOL)
+        with open(self._latest_checkpoint_marker_path(model_save_dir), "w", encoding="utf-8") as f:
+            json.dump({"latest_step": checkpoint_step}, f)
+        if self.resume_keep_latest_only and previous_step not in [None, checkpoint_step]:
+            self._delete_old_runtime_state(model_save_dir, previous_step)
+
+    def _load_checkpoint(self, model_save_dir, step):
+        print("loading checkpoint state from {}".format(model_save_dir))
+        self.agent.load(model_save_dir, step, load_optimizer_state=True)
+        self.reward_model.load(model_save_dir, step, load_runtime_state=True)
+        replay_state_path = self._replay_buffer_state_path(model_save_dir, step)
+        if os.path.exists(replay_state_path):
+            self.replay_buffer.load(replay_state_path)
+        workspace_state = self._load_workspace_state(model_save_dir, step)
+        self.step = int(workspace_state.get("step", step))
+        self.total_feedback = int(workspace_state.get("total_feedback", 0))
+        self.labeled_feedback = int(workspace_state.get("labeled_feedback", 0))
         
     def evaluate(self, save_additional=False):
         average_episode_reward = 0
         average_true_episode_reward = 0
         success_rate = 0
-        
-        save_gif_dir = os.path.join(self.logger._log_dir, 'eval_gifs')
-        if not os.path.exists(save_gif_dir):
-            os.makedirs(save_gif_dir)
+        capture_media = self.cfg.save_video or save_additional
+        save_gif_dir = None
+        if capture_media:
+            save_gif_dir = os.path.join(self.logger._log_dir, 'eval_gifs')
+            if not os.path.exists(save_gif_dir):
+                os.makedirs(save_gif_dir)
 
         all_ep_infos = []
         for episode in range(self.cfg.num_eval_episodes):
             print("evaluating episode {}".format(episode))
-            images = []
+            images = [] if capture_media else None
             obs = self.env.reset()
             if "metaworld" in self.cfg.env:
                 obs = obs[0]
@@ -183,21 +302,22 @@ class Workspace(object):
                 ep_info.append(extra)
 
                 rewards.append(reward)
-                if "metaworld" in self.cfg.env:
-                    rgb_image = self.env.render()
-                    if self.cfg.mode != 'eval':
-                        rgb_image = rgb_image[::-1, :, :]
-                        if "drawer" in self.cfg.env or "sweep" in self.cfg.env:
-                            rgb_image = rgb_image[100:400, 100:400, :]
+                if capture_media:
+                    if "metaworld" in self.cfg.env:
+                        rgb_image = self.env.render()
+                        if self.cfg.mode != 'eval':
+                            rgb_image = rgb_image[::-1, :, :]
+                            if "drawer" in self.cfg.env or "sweep" in self.cfg.env:
+                                rgb_image = rgb_image[100:400, 100:400, :]
+                        else:
+                            rgb_image = rgb_image[::-1, :, :]
+                    elif self.cfg.env in ["CartPole-v1", "Acrobot-v1", "MountainCar-v0", "Pendulum-v0"]:
+                        rgb_image = self.env.render(mode='rgb_array')
                     else:
-                        rgb_image = rgb_image[::-1, :, :]
-                elif self.cfg.env in ["CartPole-v1", "Acrobot-v1", "MountainCar-v0", "Pendulum-v0"]:
-                    rgb_image = self.env.render(mode='rgb_array')
-                else:
-                    rgb_image = self.env.render(mode='rgb_array')
+                        rgb_image = self.env.render(mode='rgb_array')
 
-                if 'softgym' not in self.cfg.env:
-                    images.append(rgb_image)
+                    if 'softgym' not in self.cfg.env:
+                        images.append(rgb_image)
 
                 episode_reward += reward
                 true_episode_reward += reward
@@ -209,11 +329,12 @@ class Workspace(object):
                     break
                     
             all_ep_infos.append(ep_info)
-            if 'softgym' in self.cfg.env:
+            if capture_media and 'softgym' in self.cfg.env:
                 images = self.env.video_frames
-                
-            save_gif_path = os.path.join(save_gif_dir, 'step{:07}_episode{:02}_{}.gif'.format(self.step, episode, round(true_episode_reward, 2)))
-            utils.save_numpy_as_gif(np.array(images), save_gif_path)
+
+            if self.cfg.save_video and images:
+                save_gif_path = os.path.join(save_gif_dir, 'step{:07}_episode{:02}_{}.gif'.format(self.step, episode, round(true_episode_reward, 2)))
+                utils.save_numpy_as_gif(np.array(images), save_gif_path)
             if save_additional:
                 save_image_dir = os.path.join(self.logger._log_dir, 'eval_images')
                 if not os.path.exists(save_image_dir):
@@ -302,23 +423,45 @@ class Workspace(object):
         return total_acc, self.reward_model.vlm_label_acc
 
     def run(self):
-        model_save_dir = os.path.join(self.work_dir, "models")
+        model_save_dir = self.model_save_dir
         if not os.path.exists(model_save_dir):
             os.makedirs(model_save_dir)
-        
-        episode, episode_reward, done = 0, 0, True
-        if self.log_success:
-            episode_success = 0
-        true_episode_reward = 0
-        
+
         # store train returns of recent 10 episodes
         avg_train_true_return = deque([], maxlen=10) 
         start_time = time.time()
+        pending_checkpoint_step = None
 
-        interact_count = 0
-        reward_learning_acc = 0
-        vlm_acc = 0
-        eval_cnt = 0
+        if self.resume_checkpoint_state is not None:
+            episode = int(self.resume_checkpoint_state.get("episode", 1))
+            interact_count = int(self.resume_checkpoint_state.get("interact_count", 0))
+            reward_learning_acc = float(self.resume_checkpoint_state.get("reward_learning_acc", 0))
+            vlm_acc = float(self.resume_checkpoint_state.get("vlm_acc", 0))
+            eval_cnt = int(self.resume_checkpoint_state.get("eval_cnt", 0))
+            avg_train_true_return.extend(self.resume_checkpoint_state.get("avg_train_true_return", []))
+            obs = self.env.reset()
+            if "metaworld" in self.cfg.env:
+                obs = obs[0]
+            self.agent.reset()
+            done = False
+            episode_reward = 0
+            true_episode_reward = 0
+            episode_step = 0
+            if self.log_success:
+                episode_success = 0
+            self.logger.log('train/episode', episode, self.step)
+            traj_images = []
+            ep_info = []
+        else:
+            episode, episode_reward, done = 0, 0, True
+            if self.log_success:
+                episode_success = 0
+            true_episode_reward = 0
+            interact_count = 0
+            reward_learning_acc = 0
+            vlm_acc = 0
+            eval_cnt = 0
+
         while self.step < self.cfg.num_train_steps:
             if done:
                 if self.step > 0:
@@ -370,6 +513,18 @@ class Workspace(object):
                 
                 traj_images = []
                 ep_info = []
+                if pending_checkpoint_step is not None:
+                    self._save_checkpoint(
+                        model_save_dir,
+                        pending_checkpoint_step,
+                        episode,
+                        interact_count,
+                        reward_learning_acc,
+                        vlm_acc,
+                        eval_cnt,
+                        avg_train_true_return,
+                    )
+                    pending_checkpoint_step = None
                         
             # sample action for data collection
             if self.step < self.cfg.num_seed_steps:
@@ -499,12 +654,14 @@ class Workspace(object):
                     reward_hat = self.reward_model.r_hat(image)
                     self.reward_model.train()
             elif self.reward == 'blip2_image_text_matching':
+                from vlms.blip_infer_2 import blip2_image_text_matching
                 query_image = rgb_image
                 query_prompt = clip_env_prompts[self.cfg.env] 
                 reward_hat = blip2_image_text_matching(query_image, query_prompt) * 2 - 1 # actually we should scale it [-1, 1] since tanh is used in the reward model
                 if self.cfg.flip_vlm_label:
                     reward_hat = -reward_hat
             elif self.reward == 'clip_image_text_matching':
+                from vlms.clip_infer import clip_infer_score as clip_image_text_matching
                 query_image = rgb_image
                 query_prompt = clip_env_prompts[self.cfg.env] 
                 reward_hat = clip_image_text_matching(query_image, query_prompt) * 2 - 1 # actually we should scale it [-1, 1] since tanh is used in the reward model
@@ -547,20 +704,29 @@ class Workspace(object):
             interact_count += 1
             
             if self.step % self.cfg.save_interval == 0 and self.step > 0:
-                self.agent.save(model_save_dir, self.step)
-                self.reward_model.save(model_save_dir, self.step)
+                pending_checkpoint_step = self.step
             
         self.agent.save(model_save_dir, self.step)
         self.reward_model.save(model_save_dir, self.step)
+
+    def close(self):
+        self.logger.close()
+        if hasattr(self.env, "close"):
+            try:
+                self.env.close()
+            except Exception:
+                pass
         
 @hydra.main(config_path='config/train_PEBBLE.yaml', strict=True)
 def main(cfg):
     workspace = Workspace(cfg)
-
-    if cfg.mode == 'eval':
-        workspace.evaluate(save_additional=cfg.save_images)
-        exit()
-    workspace.run()
+    try:
+        if cfg.mode == 'eval':
+            workspace.evaluate(save_additional=cfg.save_images)
+            return
+        workspace.run()
+    finally:
+        workspace.close()
 
 if __name__ == '__main__':
     main()

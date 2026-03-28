@@ -24,6 +24,13 @@ from reward_model import gen_image_net, gen_image_net2
 
 device = 'cuda'
 
+
+def optimizer_to(optimizer, device_name):
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device_name)
+
 def gen_net(in_size=1, out_size=1, H=128, n_layers=3, activation='tanh'):
     net = []
     for i in range(n_layers):
@@ -385,14 +392,82 @@ class RewardModelScore:
             torch.save(
                 self.ensemble[member].state_dict(), '%s/reward_model_%s_%s.pt' % (model_dir, step, member)
             )
-            
-    def load(self, model_dir, step):
+        with open('%s/reward_model_state_%s.pkl' % (model_dir, step), 'wb') as f:
+            pkl.dump(self.state_dict(), f, protocol=pkl.HIGHEST_PROTOCOL)
+
+    def _resolve_model_dir(self, model_dir):
+        if os.path.isabs(model_dir):
+            return model_dir
         file_dir = os.path.dirname(os.path.realpath(__file__))
-        model_dir = os.path.join(file_dir, model_dir)
+        return os.path.join(file_dir, model_dir)
+
+    def state_dict(self):
+        if self.buffer_full:
+            buffer_seg1 = self.buffer_seg1.copy()
+            buffer_seg2 = self.buffer_seg2.copy()
+            buffer_label = self.buffer_label.copy()
+        else:
+            buffer_seg1 = self.buffer_seg1[:self.buffer_index].copy()
+            buffer_seg2 = self.buffer_seg2[:self.buffer_index].copy()
+            buffer_label = self.buffer_label[:self.buffer_index].copy()
+        return {
+            "opt": self.opt.state_dict(),
+            "buffer_seg1": buffer_seg1,
+            "buffer_seg2": buffer_seg2,
+            "buffer_label": buffer_label,
+            "buffer_index": self.buffer_index,
+            "buffer_full": self.buffer_full,
+            "inputs": self.inputs,
+            "targets": self.targets,
+            "img_inputs": self.img_inputs,
+            "mb_size": self.mb_size,
+            "origin_mb_size": self.origin_mb_size,
+            "running_means": self.running_means,
+            "running_stds": self.running_stds,
+            "best_seg": self.best_seg,
+            "best_label": self.best_label,
+            "best_action": self.best_action,
+            "teacher_thres_skip": self.teacher_thres_skip,
+            "teacher_thres_equal": self.teacher_thres_equal,
+            "vlm_label_acc": self.vlm_label_acc,
+            "train_times": self.train_times,
+            "read_cache_idx": self.read_cache_idx,
+        }
+            
+    def load(self, model_dir, step, load_runtime_state=True):
+        model_dir = self._resolve_model_dir(model_dir)
         for member in range(self.de):
             self.ensemble[member].load_state_dict(
                 torch.load('%s/reward_model_%s_%s.pt' % (model_dir, step, member))
             )
+        if load_runtime_state:
+            state_path = '%s/reward_model_state_%s.pkl' % (model_dir, step)
+            if os.path.exists(state_path):
+                with open(state_path, 'rb') as f:
+                    state = pkl.load(f)
+                self.opt.load_state_dict(state["opt"])
+                optimizer_to(self.opt, device)
+                self.buffer_index = int(state["buffer_index"])
+                self.buffer_full = bool(state["buffer_full"])
+                load_size = self.capacity if self.buffer_full else len(state["buffer_label"])
+                self.buffer_seg1[:load_size] = state["buffer_seg1"]
+                self.buffer_seg2[:load_size] = state["buffer_seg2"]
+                self.buffer_label[:load_size] = state["buffer_label"]
+                self.inputs = state["inputs"]
+                self.targets = state["targets"]
+                self.img_inputs = state["img_inputs"]
+                self.mb_size = int(state["mb_size"])
+                self.origin_mb_size = int(state.get("origin_mb_size", self.origin_mb_size))
+                self.running_means = state.get("running_means", [])
+                self.running_stds = state.get("running_stds", [])
+                self.best_seg = state.get("best_seg", [])
+                self.best_label = state.get("best_label", [])
+                self.best_action = state.get("best_action", [])
+                self.teacher_thres_skip = state.get("teacher_thres_skip", 0)
+                self.teacher_thres_equal = state.get("teacher_thres_equal", 0)
+                self.vlm_label_acc = state.get("vlm_label_acc", 0)
+                self.train_times = state.get("train_times", 0)
+                self.read_cache_idx = int(state.get("read_cache_idx", 0))
     
     def get_train_acc(self):
         ensemble_acc = np.array([0 for _ in range(self.de)])

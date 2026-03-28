@@ -1,6 +1,5 @@
 from torch.utils.tensorboard import SummaryWriter
 from collections import defaultdict
-import json
 import os
 import csv
 import shutil
@@ -59,16 +58,17 @@ class AverageMeter(object):
 
 
 class MetersGroup(object):
-    def __init__(self, file_name, formating):
+    def __init__(self, file_name, formating, resume=False):
+        self._resume = resume
         self._csv_file_name = self._prepare_file(file_name, 'csv')
         self._formating = formating
         self._meters = defaultdict(AverageMeter)
-        self._csv_file = open(self._csv_file_name, 'w')
+        self._csv_file = open(self._csv_file_name, 'a' if resume else 'w')
         self._csv_writer = None
 
     def _prepare_file(self, prefix, suffix):
         file_name = f'{prefix}.{suffix}'
-        if os.path.exists(file_name):
+        if os.path.exists(file_name) and not self._resume:
             os.remove(file_name)
         return file_name
 
@@ -91,7 +91,8 @@ class MetersGroup(object):
             self._csv_writer = csv.DictWriter(self._csv_file,
                                               fieldnames=sorted(data.keys()),
                                               restval=0.0)
-            self._csv_writer.writeheader()
+            if self._csv_file.tell() == 0:
+                self._csv_writer.writeheader()
         self._csv_writer.writerow(data)
         self._csv_file.flush()
 
@@ -116,13 +117,14 @@ class MetersGroup(object):
 
     def dump(self, step, prefix, save=True):
         if len(self._meters) == 0:
-            return
+            return None
+        data = self._prime_meters()
         if save:
-            data = self._prime_meters()
             data['step'] = step
             self._dump_to_csv(data)
             self._dump_to_console(data, prefix)
         self._meters.clear()
+        return data
 
 
 class Logger(object):
@@ -130,9 +132,21 @@ class Logger(object):
                  log_dir,
                  save_tb=False,
                  log_frequency=10000,
-                 agent='sac'):
+                 agent='sac',
+                 use_wandb=False,
+                 wandb_project='',
+                 wandb_entity='',
+                 wandb_group='',
+                 wandb_name='',
+                 wandb_job_type='',
+                 wandb_mode='online',
+                 wandb_config=None,
+                 resume=False,
+                 wandb_run_id=''):
         self._log_dir = log_dir
         self._log_frequency = log_frequency
+        self._wandb = None
+        self._wandb_run = None
         if save_tb:
             tb_dir = os.path.join(log_dir, 'tb')
             if os.path.exists(tb_dir):
@@ -148,9 +162,44 @@ class Logger(object):
         assert agent in AGENT_TRAIN_FORMAT
         train_format = COMMON_TRAIN_FORMAT + AGENT_TRAIN_FORMAT[agent]
         self._train_mg = MetersGroup(os.path.join(log_dir, 'train'),
-                                     formating=train_format)
+                                     formating=train_format,
+                                     resume=resume)
         self._eval_mg = MetersGroup(os.path.join(log_dir, 'eval'),
-                                    formating=COMMON_EVAL_FORMAT)
+                                    formating=COMMON_EVAL_FORMAT,
+                                    resume=resume)
+
+        if use_wandb:
+            try:
+                import wandb
+            except ImportError as exc:
+                print(f"logger.py warning: wandb import failed; disabling W&B logging: {exc}")
+            else:
+                project = wandb_project or os.environ.get("WANDB_PROJECT") or "rlvlmf-observable"
+                entity = wandb_entity or os.environ.get("WANDB_ENTITY")
+                group = wandb_group or os.environ.get("WANDB_GROUP")
+                name = wandb_name or os.environ.get("WANDB_NAME")
+                job_type = wandb_job_type or os.environ.get("WANDB_JOB_TYPE")
+                mode = wandb_mode or os.environ.get("WANDB_MODE") or "online"
+                init_kwargs = {
+                    "project": project,
+                    "dir": log_dir,
+                    "config": wandb_config,
+                    "reinit": True,
+                    "mode": mode,
+                }
+                if entity:
+                    init_kwargs["entity"] = entity
+                if group:
+                    init_kwargs["group"] = group
+                if name:
+                    init_kwargs["name"] = name
+                if job_type:
+                    init_kwargs["job_type"] = job_type
+                if wandb_run_id:
+                    init_kwargs["id"] = wandb_run_id
+                    init_kwargs["resume"] = "allow"
+                self._wandb = wandb
+                self._wandb_run = wandb.init(**init_kwargs)
 
     def _should_log(self, step, log_frequency):
         cur_step = step
@@ -209,11 +258,33 @@ class Logger(object):
 
     def dump(self, step, save=True, ty=None):
         if ty is None:
-            self._train_mg.dump(step, 'train', save)
-            self._eval_mg.dump(step, 'eval', save)
+            train_data = self._train_mg.dump(step, 'train', save)
+            eval_data = self._eval_mg.dump(step, 'eval', save)
+            self._wandb_log_dump('train', train_data, step)
+            self._wandb_log_dump('eval', eval_data, step)
         elif ty == 'eval':
-            self._eval_mg.dump(step, 'eval', save)
+            eval_data = self._eval_mg.dump(step, 'eval', save)
+            self._wandb_log_dump('eval', eval_data, step)
         elif ty == 'train':
-            self._train_mg.dump(step, 'train', save)
+            train_data = self._train_mg.dump(step, 'train', save)
+            self._wandb_log_dump('train', train_data, step)
         else:
             raise f'invalid log type: {ty}'
+
+    def _wandb_log_dump(self, prefix, data, step):
+        if self._wandb_run is None or data is None:
+            return
+        wandb_data = {
+            f'{prefix}/{key}': value
+            for key, value in data.items()
+            if key != 'step'
+        }
+        if wandb_data:
+            self._wandb_run.log(wandb_data, step=step)
+
+    def close(self):
+        if self._sw is not None:
+            self._sw.close()
+        if self._wandb_run is not None:
+            self._wandb_run.finish()
+            self._wandb_run = None

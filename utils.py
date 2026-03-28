@@ -6,6 +6,7 @@ import os
 import random
 import math
 import metaworld
+from metaworld.envs import ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE
 import metaworld.envs.mujoco.env_dict as _env_dict
 from moviepy.editor import ImageSequenceClip
 from collections import deque
@@ -15,10 +16,29 @@ from collections import deque
 from skimage.util.shape import view_as_windows
 from torch import nn
 from torch import distributions as pyd
-from softgym.softgym.registered_env import env_arg_dict, SOFTGYM_ENVS
-from softgym.softgym.utils.normalized_env import normalize
-    
+
+
+METAWORLD_ENV_ALIASES = {
+    "button-press-topdown-observable": "button-press-topdown-v2-goal-observable",
+    "button-press-topdown-v2-observable": "button-press-topdown-v2-goal-observable",
+    "door-open-v2-observable": "door-open-v2-goal-observable",
+    "drawer-open-v2-observable": "drawer-open-v2-goal-observable",
+    "push-v2-observable": "push-v2-goal-observable",
+    "window-open-v2-observable": "window-open-v2-goal-observable",
+}
+
+
+def resolve_metaworld_env_name(env_name):
+    return METAWORLD_ENV_ALIASES.get(env_name, env_name)
+
+
+def resolve_metaworld_camera_name(env_name):
+    env_name = resolve_metaworld_env_name(env_name)
+    return env_name.replace("-goal-observable", "")
 def make_softgym_env(cfg):
+    from softgym.registered_env import env_arg_dict, SOFTGYM_ENVS
+    from softgym.utils.normalized_env import normalize
+
     env_name = cfg.env.replace('softgym_','')
     env_kwargs = env_arg_dict[env_name]
     env = normalize(SOFTGYM_ENVS[env_name](**env_kwargs))
@@ -39,17 +59,20 @@ def tie_weights(src, trg):
     assert type(src) == type(trg)
     trg.weight = src.weight
     trg.bias = src.bias
-    
+
+
 def make_metaworld_env(cfg):
-    env_name = cfg.env.replace('metaworld_','')
-    if env_name in _env_dict.ALL_V2_ENVIRONMENTS:
+    env_name = resolve_metaworld_env_name(cfg.env.replace('metaworld_', ''))
+    if env_name in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE:
+        env_cls = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[env_name]
+    elif env_name in _env_dict.ALL_V2_ENVIRONMENTS:
         env_cls = _env_dict.ALL_V2_ENVIRONMENTS[env_name]
     else:
         env_cls = _env_dict.ALL_V1_ENVIRONMENTS[env_name]
-    
+
     env = env_cls(render_mode='rgb_array')
-    env.camera_name = env_name
-    
+    env.camera_name = resolve_metaworld_camera_name(env_name)
+
     env._freeze_rand_vec = False
     env._set_task_called = True
     env.seed(cfg.seed)

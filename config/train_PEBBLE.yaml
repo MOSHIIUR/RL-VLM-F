@@ -42,6 +42,13 @@ device: cuda
 log_frequency: 10000
 log_save_tb: false
 save_interval: ${num_interact}
+wandb: false
+wandb_project: rlvlmf-observable
+wandb_entity: ""
+wandb_group: ""
+wandb_name: ""
+wandb_job_type: ""
+wandb_mode: online
 
 # video recorder
 save_video: false
@@ -81,6 +88,9 @@ reward_model_score_load_dir: "None"
 agent_model_load_dir: "None"
 mode: train
 save_images: false
+resume: false
+resume_step: -1
+resume_keep_latest_only: true
 
 # hydra configuration
 hydra:

@@ -1,3 +1,6 @@
+import os
+import pickle as pkl
+
 import numpy as np
 import torch
 import utils
@@ -25,6 +28,62 @@ class ReplayBuffer(object):
         self.idx = 0
         self.last_save = 0
         self.full = False
+
+    def _current_size(self):
+        return self.capacity if self.full else self.idx
+
+    def state_dict(self):
+        size = self._current_size()
+        state = {
+            "capacity": self.capacity,
+            "device": str(self.device),
+            "window": self.window,
+            "store_image": self.store_image,
+            "idx": self.idx,
+            "last_save": self.last_save,
+            "full": self.full,
+            "obses": self.obses.copy() if self.full else self.obses[:size].copy(),
+            "next_obses": self.next_obses.copy() if self.full else self.next_obses[:size].copy(),
+            "actions": self.actions.copy() if self.full else self.actions[:size].copy(),
+            "rewards": self.rewards.copy() if self.full else self.rewards[:size].copy(),
+            "not_dones": self.not_dones.copy() if self.full else self.not_dones[:size].copy(),
+            "not_dones_no_max": self.not_dones_no_max.copy() if self.full else self.not_dones_no_max[:size].copy(),
+        }
+        if self.store_image:
+            state["images"] = self.images.copy() if self.full else self.images[:size].copy()
+        return state
+
+    def load_state_dict(self, state):
+        self.idx = int(state["idx"])
+        self.last_save = int(state.get("last_save", 0))
+        self.full = bool(state["full"])
+
+        obses = state["obses"]
+        next_obses = state["next_obses"]
+        actions = state["actions"]
+        rewards = state["rewards"]
+        not_dones = state["not_dones"]
+        not_dones_no_max = state["not_dones_no_max"]
+
+        load_size = self.capacity if self.full else len(obses)
+        self.obses[:load_size] = obses
+        self.next_obses[:load_size] = next_obses
+        self.actions[:load_size] = actions
+        self.rewards[:load_size] = rewards
+        self.not_dones[:load_size] = not_dones
+        self.not_dones_no_max[:load_size] = not_dones_no_max
+        if self.store_image and "images" in state:
+            self.images[:load_size] = state["images"]
+
+    def save(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            pkl.dump(self.state_dict(), f, protocol=pkl.HIGHEST_PROTOCOL)
+
+    def load(self, path):
+        with open(path, "rb") as f:
+            state = pkl.load(f)
+        self.load_state_dict(state)
 
     def __len__(self):
         return self.capacity if self.full else self.idx

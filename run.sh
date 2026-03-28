@@ -154,3 +154,65 @@ python train_PEBBLE.py \
     resnet=1 \
     cached_label_path=data/cached_labels/PassWater/seed_0/
 
+
+### Observable MetaWorld smoke runs
+python train_PEBBLE.py \
+    env=metaworld_button-press-topdown-v2-goal-observable \
+    seed=0 \
+    exp_name=observable_gt_smoke \
+    reward=gt_task_reward \
+    num_seed_steps=1000 num_unsup_steps=0 num_train_steps=20000 \
+    agent.params.actor_lr=0.0003 agent.params.critic_lr=0.0003 gradient_update=1 activation=tanh \
+    agent.params.batch_size=256 double_q_critic.params.hidden_dim=256 double_q_critic.params.hidden_depth=3 \
+    diag_gaussian_actor.params.hidden_dim=256 diag_gaussian_actor.params.hidden_depth=3 \
+    num_eval_episodes=1 eval_frequency=5000 save_interval=5000
+
+python train_PEBBLE.py \
+    env=metaworld_door-open-v2-goal-observable \
+    seed=0 \
+    exp_name=observable_gt_smoke \
+    reward=gt_task_reward \
+    num_seed_steps=1000 num_unsup_steps=0 num_train_steps=20000 \
+    agent.params.actor_lr=0.0003 agent.params.critic_lr=0.0003 gradient_update=1 activation=tanh \
+    agent.params.batch_size=256 double_q_critic.params.hidden_dim=256 double_q_critic.params.hidden_depth=3 \
+    diag_gaussian_actor.params.hidden_dim=256 diag_gaussian_actor.params.hidden_depth=3 \
+    num_eval_episodes=1 eval_frequency=5000 save_interval=5000
+
+python train_PEBBLE.py \
+    env=metaworld_drawer-open-v2-goal-observable \
+    seed=0 \
+    exp_name=observable_gt_smoke \
+    reward=gt_task_reward \
+    num_seed_steps=1000 num_unsup_steps=0 num_train_steps=20000 \
+    agent.params.actor_lr=0.0003 agent.params.critic_lr=0.0003 gradient_update=1 activation=tanh \
+    agent.params.batch_size=256 double_q_critic.params.hidden_dim=256 double_q_critic.params.hidden_depth=3 \
+    diag_gaussian_actor.params.hidden_dim=256 diag_gaussian_actor.params.hidden_depth=3 \
+    num_eval_episodes=1 eval_frequency=5000 save_interval=5000
+
+python train_PEBBLE.py \
+    env=metaworld_push-v2-goal-observable \
+    seed=0 \
+    exp_name=observable_gt_smoke \
+    reward=gt_task_reward \
+    num_seed_steps=1000 num_unsup_steps=0 num_train_steps=20000 \
+    agent.params.actor_lr=0.0003 agent.params.critic_lr=0.0003 gradient_update=1 activation=tanh \
+    agent.params.batch_size=256 double_q_critic.params.hidden_dim=256 double_q_critic.params.hidden_depth=3 \
+    diag_gaussian_actor.params.hidden_dim=256 diag_gaussian_actor.params.hidden_depth=3 \
+    num_eval_episodes=1 eval_frequency=5000 save_interval=5000
+
+python train_PEBBLE.py \
+    env=metaworld_window-open-v2-goal-observable \
+    seed=0 \
+    exp_name=observable_gt_smoke \
+    reward=gt_task_reward \
+    num_seed_steps=1000 num_unsup_steps=0 num_train_steps=20000 \
+    agent.params.actor_lr=0.0003 agent.params.critic_lr=0.0003 gradient_update=1 activation=tanh \
+    agent.params.batch_size=256 double_q_critic.params.hidden_dim=256 double_q_critic.params.hidden_depth=3 \
+    diag_gaussian_actor.params.hidden_dim=256 diag_gaussian_actor.params.hidden_depth=3 \
+    num_eval_episodes=1 eval_frequency=5000 save_interval=5000
+
+# For the CLIP smoke stage, switch `reward=gt_task_reward` to `reward=clip_image_text_matching`.
+# For the local-Qwen preference smoke stage, use:
+# reward=learn_from_preference vlm_label=1 vlm=qwen_local image_reward=1
+# segment=1 reward_batch=4 reward_update=1 num_interact=1000 max_feedback=40
+# num_seed_steps=500 num_unsup_steps=500 num_train_steps=6000 cached_label_path=null

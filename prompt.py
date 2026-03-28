@@ -25,6 +25,38 @@ goal_env_prompts = {
     "softgym_ClothFoldDiagonal": "to fold the cloth diagonally from top left corner to bottom right corner",
 }
 
+observable_clip_env_prompts = {
+    "metaworld_button-press-topdown-v2-goal-observable": "The button is pressed from the top.",
+    "metaworld_door-open-v2-goal-observable": "The door is opened.",
+    "metaworld_drawer-open-v2-goal-observable": "The drawer is opened.",
+    "metaworld_push-v2-goal-observable": "The puck is at the target position.",
+    "metaworld_window-open-v2-goal-observable": "The window is opened.",
+}
+
+observable_goal_env_prompts = {
+    "metaworld_button-press-topdown-v2-goal-observable": "to press the button from the top",
+    "metaworld_door-open-v2-goal-observable": "to open the door with a revolving joint",
+    "metaworld_drawer-open-v2-goal-observable": "to open the drawer",
+    "metaworld_push-v2-goal-observable": "to push the puck to the target position",
+    "metaworld_window-open-v2-goal-observable": "to push and open the window",
+}
+
+METAWORLD_PROMPT_ALIASES = {
+    "metaworld_button-press-topdown-observable": "metaworld_button-press-topdown-v2-goal-observable",
+    "metaworld_button-press-topdown-v2-observable": "metaworld_button-press-topdown-v2-goal-observable",
+    "metaworld_door-open-v2-observable": "metaworld_door-open-v2-goal-observable",
+    "metaworld_drawer-open-v2-observable": "metaworld_drawer-open-v2-goal-observable",
+    "metaworld_push-v2-observable": "metaworld_push-v2-goal-observable",
+    "metaworld_window-open-v2-observable": "metaworld_window-open-v2-goal-observable",
+}
+
+clip_env_prompts.update(observable_clip_env_prompts)
+goal_env_prompts.update(observable_goal_env_prompts)
+
+for alias, canonical in METAWORLD_PROMPT_ALIASES.items():
+    clip_env_prompts[alias] = clip_env_prompts[canonical]
+    goal_env_prompts[alias] = goal_env_prompts[canonical]
+
 
 ##########################################################################
 ### asking gemini to output a preference with 2 stage analysis ###############
